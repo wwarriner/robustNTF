@@ -97,4 +97,3 @@ dependencies:
       - nose==1.3.7
       - tensorly==0.4.4
       - torch==1.2.0
-prefix: /home/neel/anaconda3/envs/rntf
