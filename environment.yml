@@ -1,4 +1,3 @@
-name: rntf
 channels:
   - pytorch
   - defaults
