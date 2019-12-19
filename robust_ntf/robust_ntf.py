@@ -30,7 +30,7 @@ tl.set_backend('pytorch')
 
 
 def robust_ntf(data, rank, beta, reg_val, tol, init='random', max_iter=1000,
-               print_every=10, user_prov=None):
+               print_every=10, printer=print, user_prov=None):
     """Robust Non-negative Tensor Factorization (rNTF)
 
     This function decomposes an input non-negative tensor into the sum of
@@ -89,6 +89,9 @@ def robust_ntf(data, rank, beta, reg_val, tol, init='random', max_iter=1000,
     print_every : int
         Print optimization progress every 'print_every' iterations.
 
+    printer : function
+        Print-like function to receive progress updates.
+
     user_prov : None | dict
         Only relevant if init == 'user', i.e., you provide your own
         initialization. If so, provide a dictionary with the format:
@@ -116,7 +119,7 @@ def robust_ntf(data, rank, beta, reg_val, tol, init='random', max_iter=1000,
         eps = 2.3e-16  # Slightly higher than actual epsilon in fp64
 
     # Initialize rNTF:
-    matrices, outlier = initialize_rntf(data, rank, init, user_prov)
+    matrices, outlier = initialize_rntf(data, rank, init, printer, user_prov)
 
     # Set up for the algorithm:
     # Initial approximation of the reconstruction:
@@ -142,7 +145,7 @@ def robust_ntf(data, rank, beta, reg_val, tol, init='random', max_iter=1000,
     obj[0] = fit[0] + reg_val*L21_norm(unfolder(outlier, 0))
 
     # Print initial iteration:
-    print('Iter = 0; Obj = {}'.format(obj[0]))
+    printer('Iter = 0; Obj = {}'.format(obj[0]))
     # pdb.set_trace()
 
     for iter in range(max_iter):
@@ -187,16 +190,16 @@ def robust_ntf(data, rank, beta, reg_val, tol, init='random', max_iter=1000,
         obj[iter+1] = fit[iter+1] + reg_val*L21_norm(unfolder(outlier, 0))
 
         if iter % print_every == 0:  # print progress
-            print('Iter = {}; Obj = {}; Err = {}'.format(iter+1, obj[iter+1],
+            printer('Iter = {}; Obj = {}; Err = {}'.format(iter+1, obj[iter+1],
                   torch.abs((obj[iter]-obj[iter+1])/obj[iter])))
 
         # Termination criterion:
         if torch.abs((obj[iter]-obj[iter+1])/obj[iter]) <= tol:
-            print('Algorithm converged as per defined tolerance')
+            printer('Algorithm converged as per defined tolerance')
             break
 
         if iter == (max_iter - 1):
-            print('Maximum number of iterations achieved')
+            printer('Maximum number of iterations achieved')
 
     # In case the algorithm terminated early:
     obj = obj[:iter]
@@ -205,7 +208,7 @@ def robust_ntf(data, rank, beta, reg_val, tol, init='random', max_iter=1000,
     return matrices, outlier, obj
 
 
-def initialize_rntf(data, rank, alg, user_prov=None):
+def initialize_rntf(data, rank, alg, printer=print, user_prov=None):
     """Intialize Robust Non-negative Tensor Factorization.
 
     This function retrieves an initial estimate of factor matrices and an
@@ -229,6 +232,9 @@ def initialize_rntf(data, rank, alg, user_prov=None):
             2. 'user' : you provide a dictionary containing initializations
                         for the factor matrices and outlier tensor. Must be
                         passed in the 'user_prov' parameter.
+
+    printer : function
+        Print-like function to receive status updates.
 
     user_prov : None | dict
         Only relevant if init == 'user', i.e., you provide your own
@@ -257,7 +263,7 @@ def initialize_rntf(data, rank, alg, user_prov=None):
 
     # Initialize basis and coefficients:
     if alg == 'random':
-        print('Initializing rNTF with uniform noise.')
+        printer('Initializing rNTF with uniform noise.')
 
         matrices = list()
         for idx in range(len(data.shape)):
@@ -266,7 +272,7 @@ def initialize_rntf(data, rank, alg, user_prov=None):
         return matrices, outlier
 
     elif alg == 'user':
-        print('Initializing rNTF with user input.')
+        printer('Initializing rNTF with user input.')
 
         matrices = user_prov['factors']
         outlier = user_prov['outlier']
