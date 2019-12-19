@@ -120,6 +120,7 @@ def robust_ntf(data: Union[torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torc
         The history of the optimization.
 
     """
+    assert max_iter > 0
 
     # Utilities:
     # Defining epsilon to protect against division by zero:
@@ -158,6 +159,7 @@ def robust_ntf(data: Union[torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torc
     printer('Iter = 0; Obj = {}'.format(obj[0]))
     # pdb.set_trace()
 
+    last_iter = 0
     for iter in range(max_iter):
 
         # EM step:
@@ -206,14 +208,15 @@ def robust_ntf(data: Union[torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torc
         # Termination criterion:
         if torch.abs((obj[iter]-obj[iter+1])/obj[iter]) <= tol:
             printer('Algorithm converged as per defined tolerance')
+            last_iter = iter
             break
 
         if iter == (max_iter - 1):
             printer('Maximum number of iterations achieved')
 
     # In case the algorithm terminated early:
-    obj = obj[:iter]
-    fit = fit[:iter]
+    obj = obj[:last_iter]
+    fit = fit[:last_iter]
 
     return matrices, outlier, obj
 
