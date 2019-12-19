@@ -21,6 +21,8 @@ If you find bugs and/or limitations, please email neel DOT dey AT nyu DOT edu.
 Created March 2019, refactored September 2019.
 """
 
+from typing import Callable, Union
+
 import torch
 from torch.nn.functional import normalize
 import tensorly as tl
@@ -29,8 +31,16 @@ from .matrix_utils import kr_bcd, beta_divergence, L21_norm
 tl.set_backend('pytorch')
 
 
-def robust_ntf(data, rank, beta, reg_val, tol, init='random', max_iter=1000,
-               print_every=10, printer=print, user_prov=None):
+def robust_ntf(data: Union[torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torch.FloatTensor, torch.DoubleTensor],
+    rank: int,
+    beta: float,
+    reg_val: float,
+    tol: float,
+    init: str='random',
+    max_iter: int=1000,
+    print_every: int=10,
+    printer: Callable[..., None]=print,
+    user_prov: Union[dict, None]=None):
     """Robust Non-negative Tensor Factorization (rNTF)
 
     This function decomposes an input non-negative tensor into the sum of
