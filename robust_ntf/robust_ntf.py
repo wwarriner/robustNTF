@@ -129,18 +129,23 @@ def robust_ntf(data: Union[torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torc
     else:
         eps = 2.3e-16  # Slightly higher than actual epsilon in fp64
 
+    device = data.device
+
     # Initialize rNTF:
     matrices, outlier = initialize_rntf(data, rank, init, printer, user_prov)
+    matrices = [m.to(device) for m in matrices]
+    outlier = outlier.to(device)
 
     # Set up for the algorithm:
     # Initial approximation of the reconstruction:
     data_approx = matrices[0]@(kr_bcd(matrices, 0).t())
-
+    data_approx = data_approx.to(device)
     data_approx = folder(data_approx, data, 0) + outlier + eps
 
     # EM step:
     ind = torch.ones(data.size())
     ind[torch.isnan(data) == 1] = 0
+    ind = ind.to(device)
 
     data_n = data.clone()
     data_n[ind == 0] = 0
@@ -148,8 +153,8 @@ def robust_ntf(data: Union[torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torc
 
     del data
 
-    fit = torch.zeros(max_iter+1)
-    obj = torch.zeros(max_iter+1)
+    fit = torch.zeros(max_iter+1).to(device)
+    obj = torch.zeros(max_iter+1).to(device)
 
     # Monitoring convergence:
     fit[0] = beta_divergence(data_imp, data_approx, beta)
