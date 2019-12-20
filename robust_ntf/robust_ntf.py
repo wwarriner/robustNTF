@@ -23,6 +23,7 @@ Created March 2019, refactored September 2019.
 
 from typing import Callable, Union
 
+import numpy as np
 import torch
 from torch.nn.functional import normalize
 import tensorly as tl
@@ -125,8 +126,10 @@ def robust_ntf(data: Union[torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torc
     # Utilities:
     # Defining epsilon to protect against division by zero:
     if data.type() in ('torch.cuda.FloatTensor', 'torch.FloatTensor'):
+        eps = np.finfo(np.float32).eps
     else:
-        eps = 2.3e-16  # Slightly higher than actual epsilon in fp64
+        eps = np.finfo(float).eps
+    eps = eps * 1.1 # Slightly higher than actual epsilon
 
     device = data.device
 
