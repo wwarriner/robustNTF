@@ -124,8 +124,7 @@ def robust_ntf(data: Union[torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torc
 
     # Utilities:
     # Defining epsilon to protect against division by zero:
-    if data.type() == 'torch.cuda.FloatTensor':
-        eps = 1.3e-7  # Slightly higher than actual epsilon in fp32
+    if data.type() in ('torch.cuda.FloatTensor', 'torch.FloatTensor'):
     else:
         eps = 2.3e-16  # Slightly higher than actual epsilon in fp64
 
