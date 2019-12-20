@@ -27,12 +27,14 @@ import numpy as np
 import torch
 from torch.nn.functional import normalize
 import tensorly as tl
+
 from .foldings import folder, unfolder
 from .matrix_utils import kr_bcd, beta_divergence, L21_norm
 tl.set_backend('pytorch')
 
 
-def robust_ntf(data: Union[torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torch.FloatTensor, torch.DoubleTensor],
+def robust_ntf(
+    data: Union[torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torch.FloatTensor, torch.DoubleTensor],
     rank: int,
     beta: float,
     reg_val: float,
