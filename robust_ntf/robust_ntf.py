@@ -21,7 +21,7 @@ If you find bugs and/or limitations, please email neel DOT dey AT nyu DOT edu.
 Created March 2019, refactored September 2019.
 """
 
-from typing import Callable, Union
+from typing import Callable, List, Tuple, Union
 
 import numpy as np
 import torch
@@ -32,9 +32,10 @@ from .foldings import folder, unfolder
 from .matrix_utils import kr_bcd, beta_divergence, L21_norm
 tl.set_backend('pytorch')
 
+UTensor = Union[torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torch.FloatTensor, torch.DoubleTensor]
 
 def robust_ntf(
-    data: Union[torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torch.FloatTensor, torch.DoubleTensor],
+    data: UTensor,
     rank: int,
     beta: float,
     reg_val: float,
@@ -43,7 +44,8 @@ def robust_ntf(
     max_iter: int=1000,
     print_every: int=10,
     printer: Callable[..., None]=print,
-    user_prov: Union[dict, None]=None):
+    user_prov: Union[dict, None]=None
+    ) -> Tuple[List[UTensor], UTensor, torch.Tensor]:
     """Robust Non-negative Tensor Factorization (rNTF)
 
     This function decomposes an input non-negative tensor into the sum of
