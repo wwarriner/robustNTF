@@ -136,6 +136,8 @@ def robust_ntf(
     eps = eps * 1.1 # Slightly higher than actual epsilon
 
     device = data.device
+    if "cuda" not in device.type:
+        print("Could not find GPU, using CPU...")
 
     # Initialize rNTF:
     matrices, outlier = initialize_rntf(data, rank, init, printer, user_prov)
