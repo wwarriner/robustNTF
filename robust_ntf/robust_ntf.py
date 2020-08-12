@@ -125,6 +125,10 @@ class RntfConfig:
         assert 0 < value
         self._max_iter = value
 
+    @property
+    def log_tol(self) -> float:
+        return np.log(self.tol).item()
+
     def save(self, file_path: PathLike) -> None:
         save_folder = self.save_folder
         if save_folder is not None:
@@ -227,7 +231,7 @@ class RntfData:
         self.valid_mask = valid_mask
         self.data_imputed = data_imputed
 
-    def update_approximation(self) -> None:
+    def update(self) -> None:
         assert self.ready
         assert self.data_approximation is not None
         assert self.valid_mask is not None
@@ -351,60 +355,16 @@ class RntfData:
         return out
 
 
-class RobustNTF:
-    """
-    Class implementation of robust NTF functionality. See robust_ntf() for
-    reference usage. It is preferred to use rntf.stats instead of rntf.obj.
-    Downstream users are encouraged to use pandas to deal with the resulting
-    statistics.
-    """
-
+class RntfStats:
     FIT = "fit"
     REG = "regularization"
     OBJ = "objective"
     ERR = "error"
     LOG_ERR = "log_error"
 
-    DATA_FILE = "data.pickle"
-    DATA_BACKUP_FILE = "data.bak"
-    CONFIG_FILE = "rntf_config.json"
-    CONFIG_BACKUP_FILE = "rntf_config.bak"
-    STATS_FILE = "stats.csv"
-    STATS_BACKUP_FILE = "stats.bak"
-    FILES = [
-        DATA_FILE,
-        DATA_BACKUP_FILE,
-        CONFIG_FILE,
-        CONFIG_BACKUP_FILE,
-        STATS_FILE,
-        STATS_BACKUP_FILE,
-    ]
-
     def __init__(self, config: RntfConfig):
         self._config = config
-        self._data = None
         self._stats = None
-
-    @property
-    def matrices(self) -> List[torch.Tensor]:
-        assert self._data is not None
-        assert self._data.ready
-        return [self._to_np(m) for m in self._data.matrices]
-
-    @property
-    def outlier(self) -> torch.Tensor:
-        assert self._data is not None
-        assert self._data.outlier is not None
-        return self._to_np(self._data.outlier)
-
-    @staticmethod
-    def _to_np(data: torch.Tensor) -> np.ndarray:
-        return data.cpu().numpy()
-
-    @property
-    def stats(self) -> pd.DataFrame:
-        assert self._stats is not None
-        return pd.DataFrame(self._stats)
 
     @property
     def obj(self) -> torch.Tensor:
@@ -416,153 +376,20 @@ class RobustNTF:
         obj = torch.from_numpy(obj)
         return obj
 
-    def run(
-        self,
-        initial_data: Optional[torch.Tensor] = None,
-        load_folder: Optional[PathLike] = None,
-    ) -> None:
-        """
-        If t is None, will attempt to continue from where it left off
-        """
-        # TODO make sure only one of t and load_folder is provided
-
-        if initial_data is not None:
-            data = RntfData(config=self._config)
-            data.initialize(data=initial_data)
-            self._data = data
-
-            del initial_data  # ! TODO this is dangerous!
-            self._update_statistics()  # iteration = 0
-            self._print_statistics(0)
-        else:
-            pass
-            # TODO load stuff here
-
-        iteration = self._get_iteration()
-        while self._do_continue(iteration):
-            self._data.update_approximation()
-            self._update_statistics()
-            if self._config.should_print(iteration):
-                self._print_statistics(iteration)
-            if self._config.should_save(iteration):
-                self.save()
-            iteration += 1
-
-    def _get_iteration(self) -> int:
+    @property
+    def iteration(self) -> int:
         assert self._stats is not None
-        return len(self._stats)
+        return len(self._stats)  # iteration 0 is special for initialized state
 
-    def save(self, folder: Optional[PathLike] = None) -> None:
-        if folder is None:
-            assert self._config.save_folder is not None
-            folder = self._config.save_folder
-        folder = PurePath(folder)
-
-        assert Path(folder).is_dir()
-        assert Path(folder).exists()
-
-        config_file = PurePath(folder / self.CONFIG_FILE)
-        self._config.save(file_path=config_file)
-        data_file = PurePath(folder / self.DATA_FILE)
-        self._data.save(file_path=data_file)
-
-        # TODO
-        stats_file = PurePath(folder / self.STATS_FILE)
-        _save_file(
-            data=self.stats,
-            file_path=stats_file,
-            save_fn=lambda df, f: pd.DataFrame.to_csv(df, path_or_buf=f, index=False),
-        )
-
-    @classmethod
-    def load(cls, folder: PathLike) -> Tuple["RobustNTF", "RntfConfig"]:
-        folder = PurePath(folder)
-        assert Path(folder).is_dir()
-        assert Path(folder).exists()
-
-        config_file = PurePath(folder / cls.CONFIG_FILE)
-        assert Path(config_file).is_file()
-        assert Path(config_file).exists()
-
-        data_file = PurePath(folder / cls.DATA_FILE)
-        assert Path(data_file).is_file()
-        assert Path(data_file).exists()
-
-        stats_file = PurePath(folder / cls.STATS_FILE)
-        assert Path(stats_file).is_file()
-        assert Path(stats_file).exists()
-
-        config = RntfConfig.load(config_file)
-        data = RntfData.load(data_file, config=config)
-
-        # TODO
-        stats = _load_file(
-            file_path=PurePath(folder / cls.STATS_FILE),
-            load_fn=pd.read_csv,
-            file_type="stats",
-        )
-        stats = stats.to_dict("records")
-
-        out = cls(config=config)
-        out._data = data
-        out._stats = stats
-        return out, config
-
-    def _do_continue(self, iteration) -> bool:
-        do_continue = True
-        if self._is_below_tolerance():
-            self._print_below_tolerance()
-            do_continue = False
-        if self._is_enough_iterations(iteration):
-            self._print_enough_iterations()
-            do_continue = False
-        return do_continue
-
-    def _is_below_tolerance(self) -> bool:
-        return self._get_last_err() <= self._config.tol
-
-    def _print_below_tolerance(self) -> None:
-        CONV_VALS = ", ".join(["{tol:.2e}", "log {log_tol:.4f}"])
-        CONV_VALS = CONV_VALS.format(tol=self._config.tol, log_tol=self._get_log_tol())
-        CONV_STATEMENT = "Algorithm converged per tolerance ({:s})"
-        CONV_STATEMENT = CONV_STATEMENT.format(CONV_VALS)
-        print(CONV_STATEMENT)
-
-    def _is_enough_iterations(self, iteration) -> bool:
-        return self._config.max_iter <= iteration - 1
-
-    def _print_enough_iterations(self) -> None:
-        ITER_VALS = "{max_iter:d}"
-        ITER_VALS = ITER_VALS.format(max_iter=self._config.max_iter)
-        ITER_STATEMENT = "Maximum number of iterations achieved ({:s})"
-        ITER_STATEMENT = ITER_STATEMENT.format(ITER_VALS)
-        print(ITER_STATEMENT)
-
-    def _get_last_obj(self) -> float:
+    @property
+    def err(self) -> float:
         assert self._stats is not None
-        return self._get_last_stats()[self.OBJ]
+        return self._get_last_err()
 
-    def _get_last_log_err(self) -> float:
-        assert self._stats is not None
-        return self._get_last_stats()[self.LOG_ERR]
-
-    def _get_last_err(self) -> float:
-        assert self._stats is not None
-        return self._get_last_stats()[self.ERR]
-
-    def _get_last_stats(self) -> Dict[str, Any]:
-        assert self._stats is not None
-        return self._stats[-1]
-
-    def _get_log_tol(self) -> float:
-        return np.log(self._config.tol).item()
-
-    def _update_statistics(self) -> None:
+    def update(self, fit: float, reg: float) -> None:
         """
         if stats is None, initializes stats, err set to nan
         """
-        fit = self._data.compute_beta_divergence()
-        reg = self._data.compute_regularization_term()
         obj = fit + reg
 
         if self._stats is None:
@@ -584,7 +411,7 @@ class RobustNTF:
             self._stats = []
         self._stats.append(entry)
 
-    def _print_statistics(self, iteration) -> None:
+    def iteration_to_string(self, iteration: int) -> str:
         STATEMENT = [
             "Iter: {iter: > 8d}",
             "Objective: {obj: > 6.4e}",
@@ -598,7 +425,210 @@ class RobustNTF:
             log_err=self._get_last_log_err(),
             log_tol=self._get_log_tol(),
         )
-        print(formatted)
+        return formatted
+
+    def to_df(self) -> pd.DataFrame:
+        return pd.DataFrame(self._stats)
+
+    def save(self, file_path: PathLike) -> None:
+        _save_file(
+            data=self.to_df(),
+            file_path=file_path,
+            save_fn=lambda df, f: pd.DataFrame.to_csv(df, path_or_buf=f, index=False),
+        )
+
+    @classmethod
+    def load(cls, file_path: PathLike, config: RntfConfig) -> "RntfStats":
+        stats = _load_file(file_path=file_path, load_fn=pd.read_csv, file_type="stats")
+        stats = stats.to_dict("records")
+
+        out = cls(config=config)
+        out._stats = stats
+        return out
+
+    def _get_last_obj(self) -> float:
+        assert self._stats is not None
+        return self._get_last_stats()[self.OBJ]
+
+    def _get_last_log_err(self) -> float:
+        assert self._stats is not None
+        return self._get_last_stats()[self.LOG_ERR]
+
+    def _get_last_err(self) -> float:
+        assert self._stats is not None
+        return self._get_last_stats()[self.ERR]
+
+    def _get_last_stats(self) -> Dict[str, Any]:
+        assert self._stats is not None
+        return self._stats[-1]
+
+    def _get_log_tol(self) -> float:
+        return np.log(self._config.tol).item()
+
+
+class RobustNTF:
+    """
+    Class implementation of robust NTF functionality. See robust_ntf() for
+    reference usage. It is preferred to use rntf.stats instead of rntf.obj.
+    Downstream users are encouraged to use pandas to deal with the resulting
+    statistics.
+    """
+
+    DATA_FILE = "data.pickle"
+    DATA_BACKUP_FILE = "data.bak"
+    CONFIG_FILE = "rntf_config.json"
+    CONFIG_BACKUP_FILE = "rntf_config.bak"
+    STATS_FILE = "stats.csv"
+    STATS_BACKUP_FILE = "stats.bak"
+    FILES = [
+        DATA_FILE,
+        DATA_BACKUP_FILE,
+        CONFIG_FILE,
+        CONFIG_BACKUP_FILE,
+        STATS_FILE,
+        STATS_BACKUP_FILE,
+    ]
+
+    def __init__(self, config: RntfConfig):
+        self._config = config
+        self._data = None
+        self._stats = RntfStats(config)
+
+    @property
+    def matrices(self) -> List[torch.Tensor]:
+        assert self._data is not None
+        assert self._data.ready
+        return [self._to_np(m) for m in self._data.matrices]
+
+    @property
+    def outlier(self) -> torch.Tensor:
+        assert self._data is not None
+        assert self._data.outlier is not None
+        return self._to_np(self._data.outlier)
+
+    @staticmethod
+    def _to_np(data: torch.Tensor) -> np.ndarray:
+        return data.cpu().numpy()
+
+    @property
+    def stats(self) -> pd.DataFrame:
+        return self._stats.to_df()
+
+    @property
+    def obj(self) -> torch.Tensor:
+        """
+        For backward compatibility with previous interface
+        """
+        return self._stats.obj
+
+    def run(
+        self,
+        initial_data: Optional[torch.Tensor] = None,
+        load_folder: Optional[PathLike] = None,
+    ) -> None:
+        """
+        If t is None, will attempt to continue from where it left off
+        """
+        # TODO make sure only one of t and load_folder is provided
+
+        if initial_data is not None:
+            data = RntfData(config=self._config)
+            data.initialize(data=initial_data)
+            self._data = data
+
+            del initial_data  # ! TODO this is dangerous!
+            self._update_stats(iteration=0)  # iteration = 0
+        else:
+            pass
+            # TODO load stuff here
+
+        iteration = self._stats.iteration
+        while self._do_continue(iteration):
+            self._data.update()
+            self._update_stats(iteration=iteration)
+            if self._config.should_save(iteration):
+                self.save()
+            iteration += 1
+
+    def _update_stats(self, iteration: int) -> None:
+        fit = self._data.compute_beta_divergence()
+        reg = self._data.compute_regularization_term()
+        self._stats.update(fit=fit, reg=reg)
+        if self._config.should_print(iteration):
+            print(self._stats.iteration_to_string(iteration))
+
+    def save(self, folder: Optional[PathLike] = None) -> None:
+        if folder is None:
+            assert self._config.save_folder is not None
+            folder = self._config.save_folder
+        folder = PurePath(folder)
+
+        assert Path(folder).is_dir()
+        assert Path(folder).exists()
+
+        config_file = PurePath(folder / self.CONFIG_FILE)
+        self._config.save(file_path=config_file)
+        data_file = PurePath(folder / self.DATA_FILE)
+        self._data.save(file_path=data_file)
+        stats_file = PurePath(folder / self.STATS_FILE)
+        self._stats.save(file_path=stats_file)
+
+    @classmethod
+    def load(cls, folder: PathLike) -> Tuple["RobustNTF", "RntfConfig"]:
+        folder = PurePath(folder)
+        assert Path(folder).is_dir()
+        assert Path(folder).exists()
+
+        config_file = PurePath(folder / cls.CONFIG_FILE)
+        assert Path(config_file).is_file()
+        assert Path(config_file).exists()
+
+        data_file = PurePath(folder / cls.DATA_FILE)
+        assert Path(data_file).is_file()
+        assert Path(data_file).exists()
+
+        stats_file = PurePath(folder / cls.STATS_FILE)
+        assert Path(stats_file).is_file()
+        assert Path(stats_file).exists()
+
+        config = RntfConfig.load(config_file)
+        data = RntfData.load(data_file, config=config)
+        stats = RntfStats.load(stats_file, config=config)
+
+        out = cls(config=config)
+        out._data = data
+        out._stats = stats
+        return out, config
+
+    def _do_continue(self, iteration) -> bool:
+        do_continue = True
+        if self._is_below_tolerance():
+            self._print_below_tolerance()
+            do_continue = False
+        if self._is_enough_iterations(iteration):
+            self._print_enough_iterations()
+            do_continue = False
+        return do_continue
+
+    def _is_below_tolerance(self) -> bool:
+        return self._stats.err <= self._config.tol
+
+    def _print_below_tolerance(self) -> None:
+        CONV_VALS = ", ".join(["{tol:.2e}", "log {log_tol:.4f}"])
+        CONV_VALS = CONV_VALS.format(tol=self._config.tol, log_tol=self._config.log_tol)
+        CONV_STATEMENT = "Algorithm converged per tolerance ({:s})"
+        CONV_STATEMENT = CONV_STATEMENT.format(CONV_VALS)
+        print(CONV_STATEMENT)
+
+    def _is_enough_iterations(self, iteration) -> bool:
+        return self._config.max_iter <= iteration - 1
+
+    def _print_enough_iterations(self) -> None:
+        ITER_VALS = "{max_iter:d}"
+        ITER_VALS = ITER_VALS.format(max_iter=self._config.max_iter)
+        ITER_STATEMENT = "Maximum number of iterations achieved ({:s})"
+        ITER_STATEMENT = ITER_STATEMENT.format(ITER_VALS)
+        print(ITER_STATEMENT)
 
 
 def robust_ntf(
