@@ -13,7 +13,7 @@ import scipy.signal
 from tensorly.kruskal_tensor import kruskal_to_tensor
 from tensorly.tenalg.outer_product import outer
 
-from robust_ntf.robust_ntf import robust_ntf, RobustNTF
+from robust_ntf.robust_ntf import robust_ntf, RobustNTF, RntfConfig
 
 torch.set_default_tensor_type(torch.cuda.DoubleTensor)
 tl.set_backend("pytorch")
@@ -54,7 +54,15 @@ class TestRobustNTF(unittest.TestCase):
     def test_save_load_idempotency(self):
         SAVE_FOLDER = PurePath(str(uuid.uuid4()))
         Path(SAVE_FOLDER).mkdir(parents=False, exist_ok=False)
-        rntf = RobustNTF(
+        atexit.register(lambda x: Path(x).rmdir(), SAVE_FOLDER)
+
+        paths = [PurePath(SAVE_FOLDER) / f for f in RobustNTF.FILES]
+        for path in paths:
+            atexit.register(
+                lambda x: Path(x).unlink(), path
+            )  # change to missing_ok=True in 3.8
+
+        config = RntfConfig(
             rank=3,
             beta=2.0,
             reg_val=0.1,
@@ -64,28 +72,31 @@ class TestRobustNTF(unittest.TestCase):
             save_every=25,
             save_folder=SAVE_FOLDER,
         )
-        rntf.apply(self.t.cuda()),
+        rntf = RobustNTF(config)
+        rntf.run(self.t.cuda()),
+
         save_points = np.random.randint(2, 1000, [50])
         save_points = sorted(list(save_points))
-        atexit.register(lambda x: Path(x).rmdir(), SAVE_FOLDER)
-        paths = [PurePath(SAVE_FOLDER) / f for f in RobustNTF.FILES]
-        for path in paths:
-            atexit.register(
-                lambda x: Path(x).unlink(), path
-            )  # change to missing_ok=True in 3.8
         for iteration in save_points:
             rntf.save()
-            rntf_loaded = RobustNTF.load(SAVE_FOLDER)
+            rntf_loaded, config_loaded = RobustNTF.load(SAVE_FOLDER)
+
+            actual = config_loaded
+            expected = config
+            self.assertEqual(actual.max_iter, expected.max_iter)
+
             actual = rntf_loaded
             expected = rntf
-            self.assertEqual(actual.max_iter, expected.max_iter)
             np.testing.assert_array_equal(actual.outlier, expected.outlier)
             for a, e in zip(actual.matrices, expected.matrices):
                 np.testing.assert_array_equal(a, e)
             pd.testing.assert_frame_equal(actual.stats, expected.stats)
 
+            config_loaded.max_iter = iteration
+
             rntf = rntf_loaded
-            rntf.max_iter = iteration
+            config = config_loaded
+
             rntf.run()
 
     def test_iterations(self):
