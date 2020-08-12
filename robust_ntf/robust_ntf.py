@@ -45,7 +45,6 @@ PathLike = Union[str, Path, PurePath]
 # TODO pull out loop into separate function so we can store intermediate results to disk
 # TODO read/write functions for storage
 # TODO return full diagnostic information for downstream consumption
-# TODO remove printer
 
 
 class RobustNTF:
@@ -92,7 +91,6 @@ class RobustNTF:
         user_prov: Union[dict, None] = None,
         save_every: int = 0,
         save_folder: Optional[PathLike] = None,
-        printer: Callable[..., None] = print,
         allow_cpu: bool = False,
     ):
         rank = int(rank)
@@ -134,7 +132,6 @@ class RobustNTF:
         self._print_every = print_every
         self._user_prov = user_prov
         self._save_every = save_every
-        self._printer = printer
         self._allow_cpu = allow_cpu
 
         self._stats = None
@@ -260,7 +257,7 @@ class RobustNTF:
 
         # Initialize rNTF:
         matrices, outlier = initialize_rntf(
-            data, self._rank, self._init, self._printer, self._user_prov
+            data, self._rank, self._init, self._user_prov
         )
         matrices = [m.to(device) for m in matrices]
         outlier = outlier.to(device)
@@ -438,7 +435,7 @@ class RobustNTF:
         return out
 
     @classmethod
-    def load(cls, folder: PathLike, printer: Callable[..., None] = print):
+    def load(cls, folder: PathLike):
         assert Path(folder).is_dir()
         assert Path(folder).exists()
         folder = PurePath(folder)
@@ -471,7 +468,6 @@ class RobustNTF:
             max_iter=config["max_iter"],
             print_every=config["print_every"],
             save_every=config["save_every"],
-            printer=printer,
             allow_cpu=config["allow_cpu"],
         )
         out._device = device
@@ -507,7 +503,7 @@ class RobustNTF:
         CONV_VALS = CONV_VALS.format(tol=self._tol, log_tol=self._get_log_tol())
         CONV_STATEMENT = "Algorithm converged per tolerance ({:s})"
         CONV_STATEMENT = CONV_STATEMENT.format(CONV_VALS)
-        self._printer(CONV_STATEMENT)
+        print(CONV_STATEMENT)
 
     def _is_enough_iterations(self, iteration) -> bool:
         return self._max_iter <= iteration - 1
@@ -517,7 +513,7 @@ class RobustNTF:
         ITER_VALS = ITER_VALS.format(max_iter=self._max_iter)
         ITER_STATEMENT = "Maximum number of iterations achieved ({:s})"
         ITER_STATEMENT = ITER_STATEMENT.format(ITER_VALS)
-        self._printer(ITER_STATEMENT)
+        print(ITER_STATEMENT)
 
     def _get_last_obj(self) -> float:
         assert self._stats is not None
@@ -583,7 +579,7 @@ class RobustNTF:
             log_err=self._get_last_log_err(),
             log_tol=self._get_log_tol(),
         )
-        self._printer(formatted)
+        print(formatted)
 
     def _do_print(self, iteration: int) -> bool:
         if self._print_every == 0:
@@ -618,7 +614,6 @@ def robust_ntf(
     init: str = "random",
     max_iter: int = 10000,
     print_every: int = 100,
-    printer: Callable[..., None] = print,
     user_prov: Union[dict, None] = None,
     allow_cpu: bool = False,
     save_every: int = 0,
@@ -682,9 +677,6 @@ def robust_ntf(
     print_every : int
         Print optimization progress every 'print_every' iterations.
 
-    printer : function
-        Print-like function to receive progress updates.
-
     user_prov : None | dict
         Only relevant if init == 'user', i.e., you provide your own
         initialization. If so, provide a dictionary with the format:
@@ -715,7 +707,6 @@ def robust_ntf(
         max_iter=max_iter,
         print_every=print_every,
         user_prov=user_prov,
-        printer=printer,
         allow_cpu=allow_cpu,
         save_folder=save_folder,
         save_every=save_every,
@@ -730,7 +721,7 @@ def robust_ntf(
     return matrices, outlier, obj
 
 
-def initialize_rntf(data, rank, alg, printer=print, user_prov=None):
+def initialize_rntf(data, rank, alg, user_prov=None):
     """Intialize Robust Non-negative Tensor Factorization.
 
     This function retrieves an initial estimate of factor matrices and an
@@ -754,9 +745,6 @@ def initialize_rntf(data, rank, alg, printer=print, user_prov=None):
             2. 'user' : you provide a dictionary containing initializations
                         for the factor matrices and outlier tensor. Must be
                         passed in the 'user_prov' parameter.
-
-    printer : function
-        Print-like function to receive status updates.
 
     user_prov : None | dict
         Only relevant if init == 'user', i.e., you provide your own
@@ -785,7 +773,7 @@ def initialize_rntf(data, rank, alg, printer=print, user_prov=None):
 
     # Initialize basis and coefficients:
     if alg == "random":
-        printer("Initializing rNTF with uniform noise.")
+        print("Initializing rNTF with uniform noise.")
 
         matrices = list()
         for idx in range(len(data.shape)):
@@ -794,7 +782,7 @@ def initialize_rntf(data, rank, alg, printer=print, user_prov=None):
         return matrices, outlier
 
     elif alg == "user":
-        printer("Initializing rNTF with user input.")
+        print("Initializing rNTF with user input.")
 
         matrices = user_prov["factors"]
         outlier = user_prov["outlier"]
