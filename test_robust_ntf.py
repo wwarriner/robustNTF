@@ -1,4 +1,5 @@
 from pathlib import Path, PurePath
+from typing import Union
 import unittest
 import atexit
 import uuid
@@ -7,16 +8,16 @@ import torch
 import numpy as np
 import pandas as pd
 import tensorly as tl
-import matplotlib.pyplot as plt
 import scipy
 import scipy.signal
 from tensorly.kruskal_tensor import kruskal_to_tensor
-from tensorly.tenalg.outer_product import outer
 
 from robust_ntf.robust_ntf import robust_ntf, RobustNTF, RntfConfig
 
 torch.set_default_tensor_type(torch.cuda.DoubleTensor)
 tl.set_backend("pytorch")
+
+PathLike = Union[str, Path, PurePath]
 
 
 class TestRobustNTF(unittest.TestCase):
@@ -58,9 +59,7 @@ class TestRobustNTF(unittest.TestCase):
 
         paths = [PurePath(SAVE_FOLDER) / f for f in RobustNTF.FILES]
         for path in paths:
-            atexit.register(
-                lambda x: Path(x).unlink(), path
-            )  # change to missing_ok=True in 3.8
+            atexit.register(self.delete_file, path)  # change to missing_ok=True in 3.8
 
         config = RntfConfig(
             rank=3,
@@ -75,10 +74,12 @@ class TestRobustNTF(unittest.TestCase):
         rntf = RobustNTF(config)
         rntf.run(self.t.cuda()),
 
-        save_points = np.random.randint(2, 1000, [50])
+        save_points = np.random.randint(2, 500, [20])
         save_points = sorted(list(save_points))
         for iteration in save_points:
             rntf.save()
+            self.assertTrue(RobustNTF.check_data_exists(SAVE_FOLDER))
+
             rntf_loaded, config_loaded = RobustNTF.load(SAVE_FOLDER)
 
             actual = config_loaded
@@ -99,6 +100,74 @@ class TestRobustNTF(unittest.TestCase):
 
             rntf.run()
 
+    def test_data_saved(self):
+        SAVE_FOLDER = PurePath(str(uuid.uuid4()))
+        Path(SAVE_FOLDER).mkdir(parents=False, exist_ok=False)
+        atexit.register(lambda x: Path(x).rmdir(), SAVE_FOLDER)
+
+        paths = [PurePath(SAVE_FOLDER) / f for f in RobustNTF.FILES]
+        for path in paths:
+            atexit.register(self.delete_file, path)  # change to missing_ok=True in 3.8
+
+        config = RntfConfig(
+            rank=3,
+            beta=2.0,
+            reg_val=0.1,
+            tol=1e-8,
+            max_iter=1,
+            print_every=100,
+            save_every=25,
+            save_folder=SAVE_FOLDER,
+        )
+        rntf = RobustNTF(config)
+        rntf.run(self.t.cuda()),
+
+        save_points = np.random.randint(2, 500, [20])
+        save_points = sorted(list(save_points))
+        for iteration in save_points:
+            rntf.save()
+            self.assertTrue(RobustNTF.check_data_exists(SAVE_FOLDER))
+            for path in paths:
+                self.delete_file(path)
+
+    def test_load_backup(self):
+        SAVE_FOLDER = PurePath(str(uuid.uuid4()))
+        Path(SAVE_FOLDER).mkdir(parents=False, exist_ok=False)
+        atexit.register(lambda x: Path(x).rmdir(), SAVE_FOLDER)
+
+        paths = [PurePath(SAVE_FOLDER) / f for f in RobustNTF.FILES]
+        for path in paths:
+            atexit.register(self.delete_file, path)  # change to missing_ok=True in 3.8
+
+        config = RntfConfig(
+            rank=3,
+            beta=2.0,
+            reg_val=0.1,
+            tol=1e-8,
+            max_iter=1,
+            print_every=100,
+            save_every=25,
+            save_folder=SAVE_FOLDER,
+        )
+        rntf = RobustNTF(config)
+        rntf.run(self.t.cuda()),
+        rntf.save()
+        rntf.save()
+        for path in RobustNTF.PREFERRED_FILES:
+            self.delete_file(SAVE_FOLDER / path)
+        rntf_loaded, config_loaded = RobustNTF.load(SAVE_FOLDER)
+
+        actual = config_loaded
+        expected = config
+        self.assertEqual(actual.max_iter, expected.max_iter)
+
+        actual = rntf_loaded
+        expected = rntf
+        np.testing.assert_array_equal(actual.outlier, expected.outlier)
+        for a, e in zip(actual.matrices, expected.matrices):
+            np.testing.assert_array_equal(a, e)
+        pd.testing.assert_frame_equal(actual.stats, expected.stats)
+
     def test_iterations(self):
         factors, outlier, objective = robust_ntf(
             data=self.t.cuda(),
@@ -112,3 +181,9 @@ class TestRobustNTF(unittest.TestCase):
         actual = torch.numel(objective)
         expected = 2  # index 0 is pre-iter, so max_iter=1 --> iters==2
         self.assertEqual(torch.numel(objective), expected)
+
+    def delete_file(self, file_path: PathLike):
+        try:
+            Path(file_path).unlink()
+        except:
+            pass

@@ -154,318 +154,6 @@ class RntfConfig:
         return cls(**config)
 
 
-class RntfData:
-    def __init__(self, config: RntfConfig):
-        self._config = config
-        self.matrices = None
-        self.outlier = None
-        self.data_n = None
-        self.data_imputed = None
-        self.data_approximation = None
-        self.valid_mask = None
-        self._eps = None
-        self._device = None
-
-    @property
-    def ready(self) -> bool:
-        ok = True
-        ok = ok and self.matrices is not None
-        ok = ok and self.outlier is not None
-        ok = ok and self.data_n is not None
-        ok = ok and self.data_approximation is not None
-        ok = ok and self.valid_mask is not None
-        ok = ok and self._eps is not None
-        ok = ok and self._device is not None
-        return ok
-
-    def initialize(self, data: torch.Tensor) -> None:
-        # Utilities:
-        device = data.device
-        is_cuda = "cuda" in device.type
-        has_cuda = torch.cuda.is_available()
-
-        if has_cuda and not self._config.allow_cpu and not is_cuda:
-            print("GPU available, CPU not allowed. Moving data to GPU...")
-            data = data.to("cuda:0")
-        elif not has_cuda and not self._config.allow_cpu:
-            raise RuntimeError("GPU not found, CPU not allowed. Stopping...")
-
-        # Defining epsilon to protect against division by zero:
-        if data.type() in ("torch.cuda.FloatTensor", "torch.FloatTensor"):
-            eps = np.finfo(np.float32).eps
-        else:
-            eps = np.finfo(float).eps
-        eps = eps * 1.1  # Slightly higher than actual epsilon
-
-        # Initialize rNTF:
-        matrices, outlier = initialize_rntf(
-            data, self._config.rank, self._config.init, self._config.user_prov
-        )
-        matrices = [m.to(device) for m in matrices]
-        outlier = outlier.to(device)
-
-        # Set up for the algorithm:
-        # Initial approximation of the reconstruction:
-        data_approximation = matrices[0] @ (kr_bcd(matrices, 0).t())
-        data_approximation = data_approximation.to(device)
-        data_approximation = folder(data_approximation, data, 0) + outlier + eps
-
-        # EM step:
-        valid_mask = torch.ones(data.size(), dtype=torch.bool)
-        valid_mask[torch.isnan(data)] = False
-        valid_mask = valid_mask.to(device)
-
-        data_n = data.clone()
-        data_n[torch.bitwise_not(valid_mask)] = 0.0
-
-        data_imputed = self._impute_missing(
-            data_approximation=data_approximation, valid_mask=valid_mask, data_n=data_n
-        )
-
-        self._device = device
-        self._eps = eps
-        self.matrices = matrices
-        self.outlier = outlier
-        self.data_n = data_n
-        self.data_approximation = data_approximation
-        self.valid_mask = valid_mask
-        self.data_imputed = data_imputed
-
-    def update(self) -> None:
-        assert self.ready
-        assert self.data_approximation is not None
-        assert self.valid_mask is not None
-        assert self.data_n is not None
-
-        # EM step:
-        self.data_imputed = self._impute_missing(
-            data_approximation=self.data_approximation,
-            valid_mask=self.valid_mask,
-            data_n=self.data_n,
-        )
-
-        # Block coordinate descent/loop through modes:
-        mode_count = len(self.data_n.shape)
-        modes = list(range(mode_count))
-        for mode in modes:
-
-            # Khatri-Rao product of the matrices being held constant:
-            kr_term = kr_bcd(self.matrices, mode).t()
-
-            # Update factor matrix in mode of interest:
-            self.matrices[mode] = update_factor(
-                unfolder(self.data_imputed, mode),
-                unfolder(self.data_approximation, mode),
-                self._config.beta,
-                self.matrices[mode],
-                kr_term,
-            )
-
-            # Update reconstruction:
-            self.data_approximation = (
-                folder(self.matrices[mode] @ kr_term, self.data_n, mode)
-                + self.outlier
-                + self._eps
-            )
-
-            # Update outlier tensor:
-            outlier = update_outlier(
-                unfolder(self.data_imputed, mode),
-                unfolder(self.data_approximation, mode),
-                unfolder(self.outlier, mode),
-                self._config.beta,
-                self._config.reg_val,
-            )
-            self.outlier = folder(outlier, self.data_n, mode)
-
-            # Update reconstruction:
-            self.data_approximation = (
-                folder(self.matrices[mode] @ kr_term, self.data_n, mode)
-                + self.outlier
-                + self._eps
-            )
-
-    def compute_beta_divergence(self) -> float:
-        out = beta_divergence(
-            self.data_imputed, self.data_approximation, self._config.beta
-        )
-        out = out.cpu().numpy().item()
-        return out
-
-    def compute_regularization_term(self) -> float:
-        out = L21_norm(unfolder(self.outlier, 0))
-        out = self._config.reg_val * out
-        out = out.cpu().numpy().item()
-        return out
-
-    @staticmethod
-    def _impute_missing(
-        data_approximation: torch.Tensor, valid_mask: torch.Tensor, data_n: torch.Tensor
-    ) -> torch.Tensor:
-        out = data_approximation.clone()
-        out[valid_mask] = 0.0
-        out += data_n
-        return out
-
-    def save(self, file_path: PathLike) -> None:
-        assert self.ready
-        data = {
-            "outlier": self.outlier,
-            "data_n": self.data_n,
-            "data_approximation": self.data_approximation,
-            "valid_mask": self.valid_mask,
-        }
-        data = {k: v.cpu().numpy() for k, v in data.items()}
-
-        data["matrices"] = [m.cpu().numpy() for m in self.matrices]
-        data["eps"] = self._eps
-        data["device"] = str(self._device)
-
-        _save_file(data=data, file_path=file_path, save_fn=pickle.dump, is_binary=True)
-
-    @classmethod
-    def load(cls, file_path: PathLike, config: RntfConfig) -> "RntfData":
-        data = _load_file(
-            file_path=file_path, load_fn=pickle.load, file_type="data", is_binary=True
-        )
-        device = data.pop("device")
-        eps = data.pop("eps")
-
-        matrices = data.pop("matrices")
-        matrices = [torch.from_numpy(v).to(device) for v in matrices]
-
-        data = {k: torch.from_numpy(v).to(device) for k, v in data.items()}
-
-        data_approximation = data["data_approximation"]
-        valid_mask = data["valid_mask"]
-        data_n = data["data_n"]
-        data_imputed = cls._impute_missing(
-            data_approximation=data_approximation, valid_mask=valid_mask, data_n=data_n
-        )
-
-        out = cls(config=config)
-        out._device = device
-        out._eps = eps
-        out.matrices = matrices
-        out.outlier = data["outlier"]
-        out.data_n = data_n
-        out.data_approximation = data_approximation
-        out.valid_mask = valid_mask
-        out.data_imputed = data_imputed
-        return out
-
-
-class RntfStats:
-    FIT = "fit"
-    REG = "regularization"
-    OBJ = "objective"
-    ERR = "error"
-    LOG_ERR = "log_error"
-
-    def __init__(self, config: RntfConfig):
-        self._config = config
-        self._stats = None
-
-    @property
-    def obj(self) -> torch.Tensor:
-        """
-        For backward compatibility with previous interface
-        """
-        assert self._stats is not None
-        obj = np.array([s[self.OBJ] for s in self._stats])
-        obj = torch.from_numpy(obj)
-        return obj
-
-    @property
-    def iteration(self) -> int:
-        assert self._stats is not None
-        return len(self._stats)  # iteration 0 is special for initialized state
-
-    @property
-    def err(self) -> float:
-        assert self._stats is not None
-        return self._get_last_err()
-
-    def update(self, fit: float, reg: float) -> None:
-        """
-        if stats is None, initializes stats, err set to nan
-        """
-        obj = fit + reg
-
-        if self._stats is None:
-            err = float("nan")
-        else:
-            prev_obj = self._get_last_obj()
-            err = abs((prev_obj - obj) / prev_obj)
-
-        log_err = np.log(err).item()
-
-        entry = {
-            self.FIT: fit,
-            self.REG: reg,
-            self.OBJ: obj,
-            self.ERR: err,
-            self.LOG_ERR: log_err,
-        }
-        if self._stats is None:
-            self._stats = []
-        self._stats.append(entry)
-
-    def iteration_to_string(self, iteration: int) -> str:
-        STATEMENT = [
-            "Iter: {iter: > 8d}",
-            "Objective: {obj: > 6.4e}",
-            "Log Error: {log_err: > 8.4f}",
-            "Tol: {log_tol: > 8.4f}",
-        ]
-        STATEMENT = ", ".join(STATEMENT)
-        formatted = STATEMENT.format(
-            iter=iteration,
-            obj=self._get_last_obj(),
-            log_err=self._get_last_log_err(),
-            log_tol=self._get_log_tol(),
-        )
-        return formatted
-
-    def to_df(self) -> pd.DataFrame:
-        return pd.DataFrame(self._stats)
-
-    def save(self, file_path: PathLike) -> None:
-        _save_file(
-            data=self.to_df(),
-            file_path=file_path,
-            save_fn=lambda df, f: pd.DataFrame.to_csv(df, path_or_buf=f, index=False),
-        )
-
-    @classmethod
-    def load(cls, file_path: PathLike, config: RntfConfig) -> "RntfStats":
-        stats = _load_file(file_path=file_path, load_fn=pd.read_csv, file_type="stats")
-        stats = stats.to_dict("records")
-
-        out = cls(config=config)
-        out._stats = stats
-        return out
-
-    def _get_last_obj(self) -> float:
-        assert self._stats is not None
-        return self._get_last_stats()[self.OBJ]
-
-    def _get_last_log_err(self) -> float:
-        assert self._stats is not None
-        return self._get_last_stats()[self.LOG_ERR]
-
-    def _get_last_err(self) -> float:
-        assert self._stats is not None
-        return self._get_last_stats()[self.ERR]
-
-    def _get_last_stats(self) -> Dict[str, Any]:
-        assert self._stats is not None
-        return self._stats[-1]
-
-    def _get_log_tol(self) -> float:
-        return np.log(self._config.tol).item()
-
-
 class RobustNTF:
     """
     Class implementation of robust NTF functionality. See robust_ntf() for
@@ -488,6 +176,7 @@ class RobustNTF:
         STATS_FILE,
         STATS_BACKUP_FILE,
     ]
+    PREFERRED_FILES = [DATA_FILE, CONFIG_FILE, STATS_FILE]
 
     def __init__(self, config: RntfConfig):
         self._config = config
@@ -521,16 +210,10 @@ class RobustNTF:
         """
         return self._stats.obj
 
-    def run(
-        self,
-        initial_data: Optional[torch.Tensor] = None,
-        load_folder: Optional[PathLike] = None,
-    ) -> None:
+    def run(self, initial_data: Optional[torch.Tensor] = None) -> None:
         """
         If t is None, will attempt to continue from where it left off
         """
-        # TODO make sure only one of t and load_folder is provided
-
         if initial_data is not None:
             data = RntfData(config=self._config)
             data.initialize(data=initial_data)
@@ -538,9 +221,6 @@ class RobustNTF:
 
             del initial_data  # ! TODO this is dangerous!
             self._update_stats(iteration=0)  # iteration = 0
-        else:
-            pass
-            # TODO load stuff here
 
         iteration = self._stats.iteration
         while self._do_continue(iteration):
@@ -574,25 +254,33 @@ class RobustNTF:
         self._stats.save(file_path=stats_file)
 
     @classmethod
-    def load(cls, folder: PathLike) -> Tuple["RobustNTF", "RntfConfig"]:
+    def check_data_exists(cls, folder: PathLike) -> bool:
+        ok = True
+
         folder = PurePath(folder)
-        assert Path(folder).is_dir()
-        assert Path(folder).exists()
+        ok = ok and Path(folder).is_dir()
+        ok = ok and Path(folder).exists()
 
         config_file = PurePath(folder / cls.CONFIG_FILE)
-        assert Path(config_file).is_file()
-        assert Path(config_file).exists()
+        ok = ok and _check_file(config_file)
 
         data_file = PurePath(folder / cls.DATA_FILE)
-        assert Path(data_file).is_file()
-        assert Path(data_file).exists()
+        ok = ok and _check_file(data_file)
 
         stats_file = PurePath(folder / cls.STATS_FILE)
-        assert Path(stats_file).is_file()
-        assert Path(stats_file).exists()
+        ok = ok and _check_file(stats_file)
 
+        return ok
+
+    @classmethod
+    def load(cls, folder: PathLike) -> Tuple["RobustNTF", "RntfConfig"]:
+        assert cls.check_data_exists(folder)
+
+        config_file = PurePath(folder / cls.CONFIG_FILE)
         config = RntfConfig.load(config_file)
+        data_file = PurePath(folder / cls.DATA_FILE)
         data = RntfData.load(data_file, config=config)
+        stats_file = PurePath(folder / cls.STATS_FILE)
         stats = RntfStats.load(stats_file, config=config)
 
         out = cls(config=config)
@@ -911,14 +599,326 @@ def update_outlier(data, data_approx, outlier, beta, reg_val):
     )
 
 
+class RntfData:
+    def __init__(self, config: RntfConfig):
+        self._config = config
+        self.matrices = None
+        self.outlier = None
+        self.data_n = None
+        self.data_imputed = None
+        self.data_approximation = None
+        self.valid_mask = None
+        self._eps = None
+        self._device = None
+
+    @property
+    def ready(self) -> bool:
+        ok = True
+        ok = ok and self.matrices is not None
+        ok = ok and self.outlier is not None
+        ok = ok and self.data_n is not None
+        ok = ok and self.data_approximation is not None
+        ok = ok and self.valid_mask is not None
+        ok = ok and self._eps is not None
+        ok = ok and self._device is not None
+        return ok
+
+    def initialize(self, data: torch.Tensor) -> None:
+        # Utilities:
+        device = data.device
+        is_cuda = "cuda" in device.type
+        has_cuda = torch.cuda.is_available()
+
+        if has_cuda and not self._config.allow_cpu and not is_cuda:
+            print("GPU available, CPU not allowed. Moving data to GPU...")
+            data = data.to("cuda:0")
+        elif not has_cuda and not self._config.allow_cpu:
+            raise RuntimeError("GPU not found, CPU not allowed. Stopping...")
+
+        # Defining epsilon to protect against division by zero:
+        if data.type() in ("torch.cuda.FloatTensor", "torch.FloatTensor"):
+            eps = np.finfo(np.float32).eps
+        else:
+            eps = np.finfo(float).eps
+        eps = eps * 1.1  # Slightly higher than actual epsilon
+
+        # Initialize rNTF:
+        matrices, outlier = initialize_rntf(
+            data, self._config.rank, self._config.init, self._config.user_prov
+        )
+        matrices = [m.to(device) for m in matrices]
+        outlier = outlier.to(device)
+
+        # Set up for the algorithm:
+        # Initial approximation of the reconstruction:
+        data_approximation = matrices[0] @ (kr_bcd(matrices, 0).t())
+        data_approximation = data_approximation.to(device)
+        data_approximation = folder(data_approximation, data, 0) + outlier + eps
+
+        # EM step:
+        valid_mask = torch.ones(data.size(), dtype=torch.bool)
+        valid_mask[torch.isnan(data)] = False
+        valid_mask = valid_mask.to(device)
+
+        data_n = data.clone()
+        data_n[torch.bitwise_not(valid_mask)] = 0.0
+
+        data_imputed = self._impute_missing(
+            data_approximation=data_approximation, valid_mask=valid_mask, data_n=data_n
+        )
+
+        self._device = device
+        self._eps = eps
+        self.matrices = matrices
+        self.outlier = outlier
+        self.data_n = data_n
+        self.data_approximation = data_approximation
+        self.valid_mask = valid_mask
+        self.data_imputed = data_imputed
+
+    def update(self) -> None:
+        assert self.ready
+        assert self.data_approximation is not None
+        assert self.valid_mask is not None
+        assert self.data_n is not None
+
+        # EM step:
+        self.data_imputed = self._impute_missing(
+            data_approximation=self.data_approximation,
+            valid_mask=self.valid_mask,
+            data_n=self.data_n,
+        )
+
+        # Block coordinate descent/loop through modes:
+        mode_count = len(self.data_n.shape)
+        modes = list(range(mode_count))
+        for mode in modes:
+
+            # Khatri-Rao product of the matrices being held constant:
+            kr_term = kr_bcd(self.matrices, mode).t()
+
+            # Update factor matrix in mode of interest:
+            self.matrices[mode] = update_factor(
+                unfolder(self.data_imputed, mode),
+                unfolder(self.data_approximation, mode),
+                self._config.beta,
+                self.matrices[mode],
+                kr_term,
+            )
+
+            # Update reconstruction:
+            self.data_approximation = (
+                folder(self.matrices[mode] @ kr_term, self.data_n, mode)
+                + self.outlier
+                + self._eps
+            )
+
+            # Update outlier tensor:
+            outlier = update_outlier(
+                unfolder(self.data_imputed, mode),
+                unfolder(self.data_approximation, mode),
+                unfolder(self.outlier, mode),
+                self._config.beta,
+                self._config.reg_val,
+            )
+            self.outlier = folder(outlier, self.data_n, mode)
+
+            # Update reconstruction:
+            self.data_approximation = (
+                folder(self.matrices[mode] @ kr_term, self.data_n, mode)
+                + self.outlier
+                + self._eps
+            )
+
+    def compute_beta_divergence(self) -> float:
+        out = beta_divergence(
+            self.data_imputed, self.data_approximation, self._config.beta
+        )
+        out = out.cpu().numpy().item()
+        return out
+
+    def compute_regularization_term(self) -> float:
+        out = L21_norm(unfolder(self.outlier, 0))
+        out = self._config.reg_val * out
+        out = out.cpu().numpy().item()
+        return out
+
+    @staticmethod
+    def _impute_missing(
+        data_approximation: torch.Tensor, valid_mask: torch.Tensor, data_n: torch.Tensor
+    ) -> torch.Tensor:
+        out = data_approximation.clone()
+        out[valid_mask] = 0.0
+        out += data_n
+        return out
+
+    def save(self, file_path: PathLike) -> None:
+        assert self.ready
+        data = {
+            "outlier": self.outlier,
+            "data_n": self.data_n,
+            "data_approximation": self.data_approximation,
+            "valid_mask": self.valid_mask,
+        }
+        data = {k: v.cpu().numpy() for k, v in data.items()}
+
+        data["matrices"] = [m.cpu().numpy() for m in self.matrices]
+        data["eps"] = self._eps
+        data["device"] = str(self._device)
+
+        _save_file(data=data, file_path=file_path, save_fn=pickle.dump, is_binary=True)
+
+    @classmethod
+    def load(cls, file_path: PathLike, config: RntfConfig) -> "RntfData":
+        data = _load_file(
+            file_path=file_path, load_fn=pickle.load, file_type="data", is_binary=True
+        )
+        device = data.pop("device")
+        eps = data.pop("eps")
+
+        matrices = data.pop("matrices")
+        matrices = [torch.from_numpy(v).to(device) for v in matrices]
+
+        data = {k: torch.from_numpy(v).to(device) for k, v in data.items()}
+
+        data_approximation = data["data_approximation"]
+        valid_mask = data["valid_mask"]
+        data_n = data["data_n"]
+        data_imputed = cls._impute_missing(
+            data_approximation=data_approximation, valid_mask=valid_mask, data_n=data_n
+        )
+
+        out = cls(config=config)
+        out._device = device
+        out._eps = eps
+        out.matrices = matrices
+        out.outlier = data["outlier"]
+        out.data_n = data_n
+        out.data_approximation = data_approximation
+        out.valid_mask = valid_mask
+        out.data_imputed = data_imputed
+        return out
+
+
+class RntfStats:
+    FIT = "fit"
+    REG = "regularization"
+    OBJ = "objective"
+    ERR = "error"
+    LOG_ERR = "log_error"
+
+    def __init__(self, config: RntfConfig):
+        self._config = config
+        self._stats = None
+
+    @property
+    def obj(self) -> torch.Tensor:
+        """
+        For backward compatibility with previous interface
+        """
+        assert self._stats is not None
+        obj = np.array([s[self.OBJ] for s in self._stats])
+        obj = torch.from_numpy(obj)
+        return obj
+
+    @property
+    def iteration(self) -> int:
+        assert self._stats is not None
+        return len(self._stats)  # iteration 0 is special for initialized state
+
+    @property
+    def err(self) -> float:
+        assert self._stats is not None
+        return self._get_last_err()
+
+    def update(self, fit: float, reg: float) -> None:
+        """
+        if stats is None, initializes stats, err set to nan
+        """
+        obj = fit + reg
+
+        if self._stats is None:
+            err = float("nan")
+        else:
+            prev_obj = self._get_last_obj()
+            err = abs((prev_obj - obj) / prev_obj)
+
+        log_err = np.log(err).item()
+
+        entry = {
+            self.FIT: fit,
+            self.REG: reg,
+            self.OBJ: obj,
+            self.ERR: err,
+            self.LOG_ERR: log_err,
+        }
+        if self._stats is None:
+            self._stats = []
+        self._stats.append(entry)
+
+    def iteration_to_string(self, iteration: int) -> str:
+        STATEMENT = [
+            "Iter: {iter: > 8d}",
+            "Objective: {obj: > 6.4e}",
+            "Log Error: {log_err: > 8.4f}",
+            "Tol: {log_tol: > 8.4f}",
+        ]
+        STATEMENT = ", ".join(STATEMENT)
+        formatted = STATEMENT.format(
+            iter=iteration,
+            obj=self._get_last_obj(),
+            log_err=self._get_last_log_err(),
+            log_tol=self._get_log_tol(),
+        )
+        return formatted
+
+    def to_df(self) -> pd.DataFrame:
+        return pd.DataFrame(self._stats)
+
+    def save(self, file_path: PathLike) -> None:
+        _save_file(
+            data=self.to_df(),
+            file_path=file_path,
+            save_fn=lambda df, f: pd.DataFrame.to_csv(df, path_or_buf=f, index=False),
+        )
+
+    @classmethod
+    def load(cls, file_path: PathLike, config: RntfConfig) -> "RntfStats":
+        stats = _load_file(file_path=file_path, load_fn=pd.read_csv, file_type="stats")
+        stats = stats.to_dict("records")
+
+        out = cls(config=config)
+        out._stats = stats
+        return out
+
+    def _get_last_obj(self) -> float:
+        assert self._stats is not None
+        return self._get_last_stats()[self.OBJ]
+
+    def _get_last_log_err(self) -> float:
+        assert self._stats is not None
+        return self._get_last_stats()[self.LOG_ERR]
+
+    def _get_last_err(self) -> float:
+        assert self._stats is not None
+        return self._get_last_stats()[self.ERR]
+
+    def _get_last_stats(self) -> Dict[str, Any]:
+        assert self._stats is not None
+        return self._stats[-1]
+
+    def _get_log_tol(self) -> float:
+        return np.log(self._config.tol).item()
+
+
 def _save_file(
     data: Any, file_path: PathLike, save_fn: Callable, is_binary: bool = False
-):
+) -> None:
     mode = "w"
     if is_binary:
         mode += "b"
     file_path = PurePath(file_path)
-    backup_file_path = file_path.parent / (file_path.stem + ".bak")
+    backup_file_path = _to_backup_file(file_path)
     if Path(file_path).exists():
         Path(file_path).replace(backup_file_path)
     with open(file_path, mode) as f:
@@ -927,12 +927,12 @@ def _save_file(
 
 def _load_file(
     file_path: PathLike, load_fn: Callable, file_type: str, is_binary: bool = False
-):
+) -> Any:
     mode = "r"
     if is_binary:
         mode += "b"
     file_path = PurePath(file_path)
-    backup_file_path = file_path.parent / (file_path.stem + ".bak")
+    backup_file_path = _to_backup_file(file_path)
 
     out = None
     try:
@@ -940,7 +940,6 @@ def _load_file(
             out = load_fn(f)
     except Exception as e:
         print("Unable to load {:s} file, trying backup.".format(file_type))
-        print(e)
     if out is not None:
         return out
 
@@ -951,3 +950,26 @@ def _load_file(
         print("Unable to load {:s} file backup.".format(file_type))
         raise e
     return out
+
+
+def _check_file(file_path: PathLike) -> bool:
+    file_path = PurePath(file_path)
+    backup_file_path = _to_backup_file(file_path)
+
+    ok = True
+    ok = ok and Path(file_path).is_file()
+    ok = ok and Path(file_path).exists()
+
+    if ok:
+        return ok
+
+    ok = True
+    ok = ok and Path(backup_file_path).is_file()
+    ok = ok and Path(backup_file_path).exists()
+
+    return ok
+
+
+def _to_backup_file(file_path: PathLike) -> PurePath:
+    file_path = PurePath(file_path)
+    return file_path.parent / (file_path.stem + ".bak")
