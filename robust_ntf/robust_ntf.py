@@ -196,10 +196,6 @@ class RobustNTF:
         assert self._data.outlier is not None
         return self._data.outlier
 
-    @staticmethod
-    def _to_np(data: torch.Tensor) -> np.ndarray:
-        return data.cpu().numpy()
-
     @property
     def stats(self) -> pd.DataFrame:
         return self._stats.to_df()
