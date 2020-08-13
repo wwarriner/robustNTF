@@ -849,9 +849,13 @@ class RntfData:
 
     def reconstruct(self) -> torch.Tensor:
         out = torch.zeros(self.shape, device="cpu")
-        for i in range(self.mode_count):
-            factors = [self.matrices[d][:, i].cpu() for d in range(self.ndim)]
-            out += outer(factors)
+        for mode in range(self.mode_count):
+            out += self.reconstruct_mode(mode)
+        return out
+
+    def reconstruct_mode(self, mode: int) -> torch.Tensor:
+        factors = [self.matrices[d][:, mode].cpu() for d in range(self.ndim)]
+        out = outer(factors)
         return out
 
     @staticmethod
