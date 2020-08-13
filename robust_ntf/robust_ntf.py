@@ -33,6 +33,7 @@ import pandas as pd
 import tensorly as tl
 import torch
 from torch.nn.functional import normalize
+from tensorly.tenalg.outer_product import outer
 
 from .foldings import folder, unfolder
 from .matrix_utils import L21_norm, beta_divergence, kr_bcd
@@ -187,13 +188,13 @@ class RobustNTF:
     def matrices(self) -> List[torch.Tensor]:
         assert self._data is not None
         assert self._data.ready
-        return [self._to_np(m) for m in self._data.matrices]
+        return [m for m in self._data.matrices]
 
     @property
     def outlier(self) -> torch.Tensor:
         assert self._data is not None
         assert self._data.outlier is not None
-        return self._to_np(self._data.outlier)
+        return self._data.outlier
 
     @staticmethod
     def _to_np(data: torch.Tensor) -> np.ndarray:
@@ -233,7 +234,9 @@ class RobustNTF:
     def _update_stats(self, iteration: int) -> None:
         fit = self._data.compute_beta_divergence()
         reg = self._data.compute_regularization_term()
-        self._stats.update(fit=fit, reg=reg)
+        L2 = self._data.compute_L2_accuracy()
+        Linf = self._data.compute_Linf_accuracy()
+        self._stats.update(fit=fit, reg=reg, L2=L2, Linf=Linf)
         if self._config.should_print(iteration):
             print(self._stats.iteration_to_string(iteration))
 
@@ -291,12 +294,18 @@ class RobustNTF:
     def _do_continue(self, iteration) -> bool:
         do_continue = True
         if self._is_below_tolerance():
+            self._print_final(iteration)
             self._print_below_tolerance()
             do_continue = False
         if self._is_enough_iterations(iteration):
+            self._print_final(iteration)
             self._print_enough_iterations()
             do_continue = False
         return do_continue
+
+    def _print_final(self, iteration) -> None:
+        if not self._config.should_print(iteration):
+            print(self._stats.iteration_to_string(iteration))
 
     def _is_below_tolerance(self) -> bool:
         return self._stats.err <= self._config.tol
@@ -608,6 +617,8 @@ class RntfData:
         self.data_imputed = None
         self.data_approximation = None
         self.valid_mask = None
+        self._data = None
+        self._reconstruction = None
         self._eps = None
         self._device = None
 
@@ -619,6 +630,8 @@ class RntfData:
         ok = ok and self.data_n is not None
         ok = ok and self.data_approximation is not None
         ok = ok and self.valid_mask is not None
+        ok = ok and self._data is not None
+        ok = ok and self._reconstruction is not None
         ok = ok and self._eps is not None
         ok = ok and self._device is not None
         return ok
@@ -667,6 +680,7 @@ class RntfData:
             data_approximation=data_approximation, valid_mask=valid_mask, data_n=data_n
         )
 
+        self._data = data.cpu().clone()
         self._device = device
         self._eps = eps
         self.matrices = matrices
@@ -675,6 +689,20 @@ class RntfData:
         self.data_approximation = data_approximation
         self.valid_mask = valid_mask
         self.data_imputed = data_imputed
+        self._reconstruction = self._reconstruct()
+
+    @property
+    def mode_count(self) -> int:
+        return self._config.rank
+
+    @property
+    def shape(self) -> List[int]:
+        assert self._data is not None
+        return list(self._data.shape)
+
+    @property
+    def ndim(self) -> int:
+        return len(self.shape)
 
     def update(self) -> None:
         assert self.ready
@@ -690,8 +718,7 @@ class RntfData:
         )
 
         # Block coordinate descent/loop through modes:
-        mode_count = len(self.data_n.shape)
-        modes = list(range(mode_count))
+        modes = list(range(self.mode_count))
         for mode in modes:
 
             # Khatri-Rao product of the matrices being held constant:
@@ -730,7 +757,12 @@ class RntfData:
                 + self._eps
             )
 
+        self._reconstruction = self._reconstruct()
+
     def compute_beta_divergence(self) -> float:
+        assert self.data_imputed is not None
+        assert self.data_approximation is not None
+        assert self.data_approximation is not None
         out = beta_divergence(
             self.data_imputed, self.data_approximation, self._config.beta
         )
@@ -738,18 +770,32 @@ class RntfData:
         return out
 
     def compute_regularization_term(self) -> float:
+        assert self.outlier is not None
         out = L21_norm(unfolder(self.outlier, 0))
         out = self._config.reg_val * out
         out = out.cpu().numpy().item()
         return out
 
-    @staticmethod
-    def _impute_missing(
-        data_approximation: torch.Tensor, valid_mask: torch.Tensor, data_n: torch.Tensor
-    ) -> torch.Tensor:
-        out = data_approximation.clone()
-        out[valid_mask] = 0.0
-        out += data_n
+    def compute_L2_accuracy(self) -> float:
+        assert self._reconstruction is not None
+        assert self._data is not None
+        assert self.valid_mask is not None
+        out = self._compute_error(self._reconstruction, self._data)
+        out = out[self.valid_mask]
+        out = ((out ** 2).sum()) ** 0.5
+        out = out.item()
+        assert isinstance(out, float)
+        return out
+
+    def compute_Linf_accuracy(self) -> float:
+        assert self._reconstruction is not None
+        assert self._data is not None
+        assert self.valid_mask is not None
+        out = self._compute_error(self._reconstruction, self._data)
+        out = out[self.valid_mask]
+        out = out.max()
+        out = out.item()
+        assert isinstance(out, float)
         return out
 
     def save(self, file_path: PathLike) -> None:
@@ -799,13 +845,35 @@ class RntfData:
         out.data_imputed = data_imputed
         return out
 
+    def _reconstruct(self) -> torch.Tensor:
+        out = torch.zeros(self.shape, device="cpu")
+        for i in range(self.mode_count):
+            factors = [self.matrices[d][:, i].cpu() for d in range(self.ndim)]
+            out += outer(factors)
+        return out
+
+    @staticmethod
+    def _compute_error(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+        return torch.abs(lhs - rhs)
+
+    @staticmethod
+    def _impute_missing(
+        data_approximation: torch.Tensor, valid_mask: torch.Tensor, data_n: torch.Tensor
+    ) -> torch.Tensor:
+        out = data_approximation.clone()
+        out[valid_mask] = 0.0
+        out += data_n
+        return out
+
 
 class RntfStats:
     FIT = "fit"
-    REG = "regularization"
+    REG = "regularization_term"
     OBJ = "objective"
     ERR = "error"
     LOG_ERR = "log_error"
+    L2_ACC = "L2_accuracy"
+    LINF_ACC = "Linf_accuracy"
 
     def __init__(self, config: RntfConfig):
         self._config = config
@@ -831,7 +899,7 @@ class RntfStats:
         assert self._stats is not None
         return self._get_last_err()
 
-    def update(self, fit: float, reg: float) -> None:
+    def update(self, fit: float, reg: float, L2: float, Linf: float) -> None:
         """
         if stats is None, initializes stats, err set to nan
         """
@@ -851,6 +919,8 @@ class RntfStats:
             self.OBJ: obj,
             self.ERR: err,
             self.LOG_ERR: log_err,
+            self.L2_ACC: L2,
+            self.LINF_ACC: Linf,
         }
         if self._stats is None:
             self._stats = []
@@ -862,6 +932,7 @@ class RntfStats:
             "Objective: {obj: > 6.4e}",
             "Log Error: {log_err: > 8.4f}",
             "Tol: {log_tol: > 8.4f}",
+            # TODO accuracy
         ]
         STATEMENT = ", ".join(STATEMENT)
         formatted = STATEMENT.format(
