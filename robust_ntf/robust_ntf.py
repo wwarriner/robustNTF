@@ -207,6 +207,14 @@ class RobustNTF:
         return self._data.reconstruct()
 
     @property
+    def reconstructions_per_mode(self) -> List[torch.Tensor]:
+        assert self._data is not None
+        assert self._data.ready
+        return [
+            self._data.reconstruct_mode(mode) for mode in range(self._data.mode_count)
+        ]
+
+    @property
     def obj(self) -> torch.Tensor:
         """
         For backward compatibility with previous interface
