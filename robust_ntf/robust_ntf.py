@@ -201,6 +201,12 @@ class RobustNTF:
         return self._stats.to_df()
 
     @property
+    def reconstruction(self) -> torch.Tensor:
+        assert self._data is not None
+        assert self._data.ready
+        return self._data.reconstruct()
+
+    @property
     def obj(self) -> torch.Tensor:
         """
         For backward compatibility with previous interface
@@ -685,7 +691,7 @@ class RntfData:
         self.data_approximation = data_approximation
         self.valid_mask = valid_mask
         self.data_imputed = data_imputed
-        self._reconstruction = self._reconstruct()
+        self._reconstruction = self.reconstruct()
 
     @property
     def mode_count(self) -> int:
@@ -753,7 +759,7 @@ class RntfData:
                 + self._eps
             )
 
-        self._reconstruction = self._reconstruct()
+        self._reconstruction = self.reconstruct()
 
     def compute_beta_divergence(self) -> float:
         assert self.data_imputed is not None
@@ -841,7 +847,7 @@ class RntfData:
         out.data_imputed = data_imputed
         return out
 
-    def _reconstruct(self) -> torch.Tensor:
+    def reconstruct(self) -> torch.Tensor:
         out = torch.zeros(self.shape, device="cpu")
         for i in range(self.mode_count):
             factors = [self.matrices[d][:, i].cpu() for d in range(self.ndim)]
