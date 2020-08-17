@@ -210,9 +210,7 @@ class RobustNTF:
     def reconstructions_per_mode(self) -> List[torch.Tensor]:
         assert self._data is not None
         assert self._data.ready
-        return [
-            self._data.reconstruct_mode(mode) for mode in range(self._data.mode_count)
-        ]
+        return [self._data.reconstruct_mode(rank) for rank in range(self._config.rank)]
 
     @property
     def obj(self) -> torch.Tensor:
@@ -627,8 +625,6 @@ class RntfData:
         self.data_imputed = None
         self.data_approximation = None
         self.valid_mask = None
-        self._data = None
-        self._reconstruction = None
         self._eps = None
         self._device = None
 
@@ -640,8 +636,6 @@ class RntfData:
         ok = ok and self.data_n is not None
         ok = ok and self.data_approximation is not None
         ok = ok and self.valid_mask is not None
-        ok = ok and self._data is not None
-        ok = ok and self._reconstruction is not None
         ok = ok and self._eps is not None
         ok = ok and self._device is not None
         return ok
@@ -690,7 +684,6 @@ class RntfData:
             data_approximation=data_approximation, valid_mask=valid_mask, data_n=data_n
         )
 
-        self._data = data.cpu().clone()
         self._device = device
         self._eps = eps
         self.matrices = matrices
@@ -699,16 +692,19 @@ class RntfData:
         self.data_approximation = data_approximation
         self.valid_mask = valid_mask
         self.data_imputed = data_imputed
-        self._reconstruction = self.reconstruct()
 
     @property
     def mode_count(self) -> int:
-        return self._config.rank
+        return len(self.data_n.shape)
+
+    @property
+    def modes(self) -> List[int]:
+        return list(range(self.mode_count))
 
     @property
     def shape(self) -> List[int]:
-        assert self._data is not None
-        return list(self._data.shape)
+        assert self.data_n is not None
+        return list(self.data_n.shape)
 
     @property
     def ndim(self) -> int:
@@ -728,8 +724,7 @@ class RntfData:
         )
 
         # Block coordinate descent/loop through modes:
-        modes = list(range(self.mode_count))
-        for mode in modes:
+        for mode in self.modes:
 
             # Khatri-Rao product of the matrices being held constant:
             kr_term = kr_bcd(self.matrices, mode).t()
@@ -767,8 +762,6 @@ class RntfData:
                 + self._eps
             )
 
-        self._reconstruction = self.reconstruct()
-
     def compute_beta_divergence(self) -> float:
         assert self.data_imputed is not None
         assert self.data_approximation is not None
@@ -787,10 +780,10 @@ class RntfData:
         return out
 
     def compute_L2_accuracy(self) -> float:
-        assert self._reconstruction is not None
-        assert self._data is not None
+        assert self.data_approximation is not None
+        assert self.data_n is not None
         assert self.valid_mask is not None
-        out = self._compute_error(self._reconstruction, self._data)
+        out = self._compute_error(self.data_approximation, self.data_n)
         out = out[self.valid_mask]
         out = ((out ** 2).sum()) ** 0.5
         out = out.item()
@@ -798,10 +791,10 @@ class RntfData:
         return out
 
     def compute_Linf_accuracy(self) -> float:
-        assert self._reconstruction is not None
-        assert self._data is not None
+        assert self.data_approximation is not None
+        assert self.data_n is not None
         assert self.valid_mask is not None
-        out = self._compute_error(self._reconstruction, self._data)
+        out = self._compute_error(self.data_approximation, self.data_n)
         out = out[self.valid_mask]
         out = out.max()
         out = out.item()
@@ -856,13 +849,13 @@ class RntfData:
         return out
 
     def reconstruct(self) -> torch.Tensor:
-        out = torch.zeros(self.shape, device="cpu")
-        for mode in range(self.mode_count):
-            out += self.reconstruct_mode(mode)
+        out = torch.zeros(self.shape, device=self._device)
+        for rank in list(range(self._config.rank)):
+            out += self.reconstruct_mode(rank)
         return out
 
-    def reconstruct_mode(self, mode: int) -> torch.Tensor:
-        factors = [self.matrices[d][:, mode].cpu() for d in range(self.ndim)]
+    def reconstruct_mode(self, rank: int) -> torch.Tensor:
+        factors = [self.matrices[d][:, rank] for d in range(self.ndim)]
         out = outer(factors)
         return out
 
@@ -964,7 +957,9 @@ class RntfStats:
         _save_file(
             data=self.to_df(),
             file_path=file_path,
-            save_fn=lambda df, f: pd.DataFrame.to_csv(df, path_or_buf=f, index=False),
+            save_fn=lambda df, f: pd.DataFrame.to_csv(
+                df, path_or_buf=f, index=False, line_terminator="\n"
+            ),
         )
 
     @classmethod

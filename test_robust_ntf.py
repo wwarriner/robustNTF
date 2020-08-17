@@ -88,9 +88,9 @@ class TestRobustNTF(unittest.TestCase):
 
             actual = rntf_loaded
             expected = rntf
-            np.testing.assert_array_equal(actual.outlier, expected.outlier)
+            np.testing.assert_array_equal(actual.outlier.cpu(), expected.outlier.cpu())
             for a, e in zip(actual.matrices, expected.matrices):
-                np.testing.assert_array_equal(a, e)
+                np.testing.assert_array_equal(a.cpu(), e.cpu())
             pd.testing.assert_frame_equal(actual.stats, expected.stats)
 
             config_loaded.max_iter = iteration
@@ -163,9 +163,9 @@ class TestRobustNTF(unittest.TestCase):
 
         actual = rntf_loaded
         expected = rntf
-        np.testing.assert_array_equal(actual.outlier, expected.outlier)
+        np.testing.assert_array_equal(actual.outlier.cpu(), expected.outlier.cpu())
         for a, e in zip(actual.matrices, expected.matrices):
-            np.testing.assert_array_equal(a, e)
+            np.testing.assert_array_equal(a.cpu(), e.cpu())
         pd.testing.assert_frame_equal(actual.stats, expected.stats)
 
     def test_iterations(self):
