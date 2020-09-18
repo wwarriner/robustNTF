@@ -213,6 +213,12 @@ class RobustNTF:
         return [self._data.reconstruct_mode(rank) for rank in range(self._config.rank)]
 
     @property
+    def valid_mask(self) -> torch.Tensor:
+        assert self._data is not None
+        assert self._data.valid_mask is not None
+        return self._data.valid_mask
+
+    @property
     def obj(self) -> torch.Tensor:
         """
         For backward compatibility with previous interface
