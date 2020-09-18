@@ -497,7 +497,7 @@ def initialize_rntf(data, rank, alg, user_prov=None):
         eps = 2.3e-16  # Slightly higher than actual epsilon in fp64
 
     # Initialize outliers with uniform random values:
-    outlier = torch.rand(data.size()) + eps
+    outlier = torch.rand(data.size(), dtype=data.dtype) + eps
 
     # Initialize basis and coefficients:
     if alg == "random":
@@ -505,7 +505,7 @@ def initialize_rntf(data, rank, alg, user_prov=None):
 
         matrices = list()
         for idx in range(len(data.shape)):
-            matrices.append(torch.rand(data.shape[idx], rank) + eps)
+            matrices.append(torch.rand(data.shape[idx], rank, dtype=data.dtype) + eps)
 
         return matrices, outlier
 
@@ -656,7 +656,7 @@ class RntfData:
         if data.type() in ("torch.cuda.FloatTensor", "torch.FloatTensor"):
             eps = np.finfo(np.float32).eps
         else:
-            eps = np.finfo(float).eps
+            eps = np.finfo(np.float64).eps
         eps = eps * 1.1  # Slightly higher than actual epsilon
 
         # Initialize rNTF:
@@ -849,7 +849,7 @@ class RntfData:
         return out
 
     def reconstruct(self) -> torch.Tensor:
-        out = torch.zeros(self.shape, device=self._device)
+        out = torch.zeros(self.shape, device=self._device, dtype=self.data_n.dtype)
         for rank in list(range(self._config.rank)):
             out += self.reconstruct_mode(rank)
         return out
