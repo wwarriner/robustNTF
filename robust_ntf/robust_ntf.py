@@ -23,6 +23,14 @@ Created March 2019, refactored September 2019.
 Enhancements added by William Warriner August 2020.
 """
 
+# TODO test cases
+# 1) valueerror thrown on constant-valued input
+# 2) check GPU device handling (i.e. missing)
+# 3) check dtypes of outputs are consistent with input (np.float32, np.float64)
+# 4) add check that input is FP and throw if not, check with test case
+# 5) move main API entrypoints to top of file, move private-ish stuff below
+
+
 import json
 from pathlib import Path, PurePath
 import pickle
