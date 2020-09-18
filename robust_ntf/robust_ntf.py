@@ -641,6 +641,11 @@ class RntfData:
         return ok
 
     def initialize(self, data: torch.Tensor) -> None:
+        if data.min() == data.max():
+            raise ValueError(
+                "Input tensor must not be constant-valued. Tensor factorization is ill-defined for constant-valued tensors."
+            )
+
         # Utilities:
         device = data.device
         is_cuda = "cuda" in device.type
