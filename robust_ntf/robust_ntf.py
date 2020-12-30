@@ -23,6 +23,14 @@ Created March 2019, refactored September 2019.
 Enhancements added by William Warriner August 2020.
 """
 
+# TODO test cases
+# 1) valueerror thrown on constant-valued input
+# 2) check GPU device handling (i.e. missing)
+# 3) check dtypes of outputs are consistent with input (np.float32, np.float64)
+# 4) add check that input is FP and throw if not, check with test case
+# 5) move main API entrypoints to top of file, move private-ish stuff below
+
+
 import json
 from pathlib import Path, PurePath
 import pickle
@@ -211,6 +219,12 @@ class RobustNTF:
         assert self._data is not None
         assert self._data.ready
         return [self._data.reconstruct_mode(rank) for rank in range(self._config.rank)]
+
+    @property
+    def valid_mask(self) -> torch.Tensor:
+        assert self._data is not None
+        assert self._data.valid_mask is not None
+        return self._data.valid_mask
 
     @property
     def obj(self) -> torch.Tensor:
@@ -497,7 +511,7 @@ def initialize_rntf(data, rank, alg, user_prov=None):
         eps = 2.3e-16  # Slightly higher than actual epsilon in fp64
 
     # Initialize outliers with uniform random values:
-    outlier = torch.rand(data.size()) + eps
+    outlier = torch.rand(data.size(), dtype=data.dtype) + eps
 
     # Initialize basis and coefficients:
     if alg == "random":
@@ -505,7 +519,7 @@ def initialize_rntf(data, rank, alg, user_prov=None):
 
         matrices = list()
         for idx in range(len(data.shape)):
-            matrices.append(torch.rand(data.shape[idx], rank) + eps)
+            matrices.append(torch.rand(data.shape[idx], rank, dtype=data.dtype) + eps)
 
         return matrices, outlier
 
@@ -641,6 +655,11 @@ class RntfData:
         return ok
 
     def initialize(self, data: torch.Tensor) -> None:
+        if data.min() == data.max():
+            raise ValueError(
+                "Input tensor must not be constant-valued. Tensor factorization is ill-defined for constant-valued tensors."
+            )
+
         # Utilities:
         device = data.device
         is_cuda = "cuda" in device.type
@@ -656,7 +675,7 @@ class RntfData:
         if data.type() in ("torch.cuda.FloatTensor", "torch.FloatTensor"):
             eps = np.finfo(np.float32).eps
         else:
-            eps = np.finfo(float).eps
+            eps = np.finfo(np.float64).eps
         eps = eps * 1.1  # Slightly higher than actual epsilon
 
         # Initialize rNTF:
@@ -849,7 +868,7 @@ class RntfData:
         return out
 
     def reconstruct(self) -> torch.Tensor:
-        out = torch.zeros(self.shape, device=self._device)
+        out = torch.zeros(self.shape, device=self._device, dtype=self.data_n.dtype)
         for rank in list(range(self._config.rank)):
             out += self.reconstruct_mode(rank)
         return out
